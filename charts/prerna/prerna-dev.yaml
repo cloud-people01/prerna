@@ -3,7 +3,7 @@ replicaCount: 1
 image:
   repository: bedairahmed/prerna-dev
   pullPolicy: IfNotPresent
-  tag: latest
+  tag: c4d828f
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
