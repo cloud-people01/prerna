@@ -1,0 +1,111 @@
+name: prerna-cicd
+
+on:
+  push:
+    paths:
+      - src/**
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+
+  ci:
+    runs-on: ubuntu-latest
+    outputs:
+      sha_short: ${{ steps.vars.outputs.sha_short }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set short SHA
+        id: vars
+        run: |
+          sha_short=$(git rev-parse --short HEAD)
+          echo "sha_short=$sha_short" >> "$GITHUB_OUTPUT"
+          echo "Computed sha_short: $sha_short"
+
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: "${{ vars.DOCKERHUB_USERNAME }}"
+          password: "${{ secrets.DOCKERHUB_TOKEN }}"
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags:  bedairahmed/prerna-dev:${{ steps.vars.outputs.sha_short }}
+
+  cd:
+    needs: ci
+    runs-on: self-hosted
+    env:
+      ARGOCD_USERNAME: admin
+      ARGOCD_PASSWORD: "${{ secrets.ARGOCD_PASSWORD }}"
+      GITHUB_USERNAME: bedairahmed
+      TOKEN: "${{ secrets.TOKEN }}"
+      #TAG: bedairahmed/prerna-dev:latest
+      TAG: ${{ needs.ci.outputs.sha_short }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install yq
+        run: |
+          wget https://github.com/mikefarah/yq/releases/download/v4.43.1/yq_linux_amd64 -O ./yq
+          chmod +x ./yq
+          sudo mv ./yq /usr/local/bin/yq
+
+      - name: Update values.yaml image tag
+        run: |
+          yq -i '.image.tag = strenv(TAG)' charts/prerna/prerna-dev.yaml
+
+      - name: Commit updated values.yaml
+        uses: EndBug/add-and-commit@v9
+        with:
+          message: "Update image tag in values.yaml to ${{ env.TAG }}"
+
+      - name: Install Argo CD CLI
+        run: |
+          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x argocd
+          sudo mv argocd /usr/local/bin/
+
+      - name: Deploy via Argo CD
+        run: |
+          argocd login argocg-argocd-server.argocd \
+            --username "$ARGOCD_USERNAME" \
+            --password "$ARGOCD_PASSWORD" \
+            --insecure \
+            --grpc-web
+
+          APP_NAME="prerna-dev"
+          REPO_URL="https://github.com/cloud-people01/prerna.git"
+          CHART_PATH="charts/prerna"
+          VALUES_FILE="prerna-dev.yaml"
+          DEST_NAMESPACE="dev"
+
+          # Check and add repo if not present
+          if ! argocd repo list | grep -q "$REPO_URL"; then
+            argocd repo add "$REPO_URL"
+          fi
+
+          # Check and create app if not present
+          if ! argocd app get "$APP_NAME" >/dev/null 2>&1; then
+            argocd app create "$APP_NAME" \
+              --repo "$REPO_URL" \
+              --path "$CHART_PATH" \
+              --dest-server https://kubernetes.default.svc \
+              --dest-namespace "$DEST_NAMESPACE" \
+              --values "$VALUES_FILE" \
+              # --directory-recurse \
+              # --sync-policy auto \
+              # --sync-option CreateNamespace=true
+          fi
+
+          argocd app sync "$APP_NAME"
+          argocd app wait "$APP_NAME" --health --timeout 180
